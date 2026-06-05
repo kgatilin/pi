@@ -57,6 +57,20 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export interface PiDevActivitySyncSettings {
+	deviceId?: string;
+	enabled?: boolean;
+	intervalHours?: number;
+}
+
+export interface PiDevSettings {
+	activitySync?: PiDevActivitySyncSettings;
+}
+
+export interface TelemetrySettings {
+	enabled?: boolean; // default: true unless disabled during setup
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -92,7 +106,8 @@ export interface Settings {
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
-	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
+	telemetry?: TelemetrySettings; // Anonymous analytics and crash-reporting consent
+	enableInstallTelemetry?: boolean; // Legacy setting; telemetry.enabled takes precedence
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
 	skills?: string[]; // Array of local skill file paths or directories
@@ -110,40 +125,35 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
+	piDev?: PiDevSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
-function deepMergeSettings(base: Settings, overrides: Settings): Settings {
-	const result: Settings = { ...base };
+function isPlainSettingsObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
-	for (const key of Object.keys(overrides) as (keyof Settings)[]) {
-		const overrideValue = overrides[key];
-		const baseValue = base[key];
+function deepMergeSettingsValue(base: unknown, overrides: unknown): unknown {
+	if (!isPlainSettingsObject(base) || !isPlainSettingsObject(overrides)) {
+		return overrides;
+	}
 
+	const result: Record<string, unknown> = { ...base };
+	for (const [key, overrideValue] of Object.entries(overrides)) {
 		if (overrideValue === undefined) {
 			continue;
 		}
-
-		// For nested objects, merge recursively
-		if (
-			typeof overrideValue === "object" &&
-			overrideValue !== null &&
-			!Array.isArray(overrideValue) &&
-			typeof baseValue === "object" &&
-			baseValue !== null &&
-			!Array.isArray(baseValue)
-		) {
-			(result as Record<string, unknown>)[key] = { ...baseValue, ...overrideValue };
-		} else {
-			// For primitives and arrays, override value wins
-			(result as Record<string, unknown>)[key] = overrideValue;
-		}
+		const baseValue = result[key];
+		result[key] = deepMergeSettingsValue(baseValue, overrideValue);
 	}
-
 	return result;
+}
+
+function deepMergeSettings(base: Settings, overrides: Settings): Settings {
+	return deepMergeSettingsValue(base, overrides) as Settings;
 }
 
 function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
@@ -358,7 +368,10 @@ export class SettingsManager {
 		projectTrusted = true,
 	): { settings: Settings; error: Error | null } {
 		try {
-			return { settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted), error: null };
+			return {
+				settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted),
+				error: null,
+			};
 		} catch (error) {
 			return { settings: {}, error: error as Error };
 		}
@@ -758,7 +771,11 @@ export class SettingsManager {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionSettings(): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+	} {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
@@ -790,7 +807,11 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
+	getRetrySettings(): {
+		enabled: boolean;
+		maxRetries: number;
+		baseDelayMs: number;
+	} {
 		return {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
@@ -811,7 +832,11 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
+	getProviderRetrySettings(): {
+		timeoutMs?: number;
+		maxRetries?: number;
+		maxRetryDelayMs: number;
+	} {
 		return {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
 			maxRetries: this.settings.retry?.provider?.maxRetries,
@@ -883,14 +908,25 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getTelemetryEnabled(): boolean {
+		return this.settings.telemetry?.enabled ?? this.settings.enableInstallTelemetry ?? false;
+	}
+
+	setTelemetryEnabled(enabled: boolean): void {
+		if (!this.globalSettings.telemetry) {
+			this.globalSettings.telemetry = {};
+		}
+		this.globalSettings.telemetry.enabled = enabled;
+		this.markModified("telemetry", "enabled");
+		this.save();
+	}
+
 	getEnableInstallTelemetry(): boolean {
-		return this.settings.enableInstallTelemetry ?? true;
+		return this.getTelemetryEnabled();
 	}
 
 	setEnableInstallTelemetry(enabled: boolean): void {
-		this.globalSettings.enableInstallTelemetry = enabled;
-		this.markModified("enableInstallTelemetry");
-		this.save();
+		this.setTelemetryEnabled(enabled);
 	}
 
 	getPackages(): PackageSource[] {
@@ -1146,6 +1182,48 @@ export class SettingsManager {
 	setWarnings(warnings: WarningSettings): void {
 		this.globalSettings.warnings = { ...warnings };
 		this.markModified("warnings");
+		this.save();
+	}
+
+	private ensureGlobalPiDevActivitySyncSettings(): PiDevActivitySyncSettings {
+		if (!this.globalSettings.piDev) {
+			this.globalSettings.piDev = {};
+		}
+		if (!this.globalSettings.piDev.activitySync) {
+			this.globalSettings.piDev.activitySync = {};
+		}
+		return this.globalSettings.piDev.activitySync;
+	}
+
+	getActivitySyncDeviceId(): string | undefined {
+		const deviceId = this.settings.piDev?.activitySync?.deviceId;
+		return deviceId && /^[0-9a-fA-F-]{36}$/.test(deviceId) ? deviceId : undefined;
+	}
+
+	setActivitySyncDeviceId(deviceId: string): void {
+		const activitySync = this.ensureGlobalPiDevActivitySyncSettings();
+		activitySync.deviceId = deviceId;
+		this.markModified("piDev", "activitySync");
+		this.save();
+	}
+
+	getActivitySyncSettings(): { enabled: boolean; intervalHours: number } {
+		const activitySync = this.settings.piDev?.activitySync;
+		const intervalHours = activitySync?.intervalHours;
+		return {
+			enabled: activitySync?.enabled ?? false,
+			intervalHours:
+				typeof intervalHours === "number" && Number.isFinite(intervalHours) ? Math.max(1, intervalHours) : 24,
+		};
+	}
+
+	setActivitySyncEnabled(enabled: boolean): void {
+		const activitySync = this.ensureGlobalPiDevActivitySyncSettings();
+		activitySync.enabled = enabled;
+		if (enabled) {
+			activitySync.intervalHours = 24;
+		}
+		this.markModified("piDev", "activitySync");
 		this.save();
 	}
 }

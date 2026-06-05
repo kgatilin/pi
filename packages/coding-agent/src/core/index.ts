@@ -2,6 +2,7 @@
  * Core modules shared between all run modes.
  */
 
+export * from "./activity-sync/index.ts";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -25,9 +26,17 @@ export {
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "./agent-session-services.ts";
-export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+export {
+	type BashExecutorOptions,
+	type BashResult,
+	executeBashWithOperations,
+} from "./bash-executor.ts";
 export type { CompactionResult } from "./compaction/index.ts";
-export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
+export {
+	createEventBus,
+	type EventBus,
+	type EventBusController,
+} from "./event-bus.ts";
 // Extensions system
 export {
 	type AgentEndEvent,
@@ -74,4 +83,6 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export * from "./pi-dev/index.ts";
+
 export { createSyntheticSourceInfo } from "./source-info.ts";

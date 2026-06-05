@@ -17,6 +17,11 @@ export type AuthSelectorProvider = {
 	authType: "oauth" | "api_key";
 };
 
+export interface OAuthSelectorOptions {
+	logoLines?: readonly string[];
+	border?: boolean;
+}
+
 /**
  * Component that renders an auth provider selector
  */
@@ -50,6 +55,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		onSelect: (providerId: string) => void,
 		onCancel: () => void,
 		getAuthStatus?: (providerId: string) => AuthStatus,
+		options: OAuthSelectorOptions = {},
 	) {
 		super();
 
@@ -61,9 +67,19 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
-		// Add top border
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
+		const showBorder = options.border ?? true;
+
+		if (showBorder) {
+			this.addChild(new DynamicBorder());
+			this.addChild(new Spacer(1));
+		}
+
+		for (const line of options.logoLines ?? []) {
+			this.addChild(new TruncatedText(theme.fg("accent", ` ${line}`), 1, 0));
+		}
+		if (options.logoLines && options.logoLines.length > 0) {
+			this.addChild(new Spacer(1));
+		}
 
 		// Add title
 		const title = mode === "login" ? "Select provider to configure:" : "Select provider to logout:";
@@ -86,8 +102,9 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 
 		this.addChild(new Spacer(1));
 
-		// Add bottom border
-		this.addChild(new DynamicBorder());
+		if (showBorder) {
+			this.addChild(new DynamicBorder());
+		}
 
 		// Initial render
 		this.filterProviders("");

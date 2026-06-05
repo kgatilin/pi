@@ -831,6 +831,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
+			runSetup: !startupBenchmark && !parsed.noSetup,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();

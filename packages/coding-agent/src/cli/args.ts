@@ -47,6 +47,7 @@ export interface Args {
 	offline?: boolean;
 	verbose?: boolean;
 	projectTrustOverride?: boolean;
+	noSetup?: boolean;
 	messages: string[];
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
@@ -181,6 +182,8 @@ export function parseArgs(args: string[]): Args {
 			result.projectTrustOverride = true;
 		} else if (arg === "--no-approve" || arg === "-na") {
 			result.projectTrustOverride = false;
+		} else if (arg === "--no-setup") {
+			result.noSetup = true;
 		} else if (arg === "--offline") {
 			result.offline = true;
 		} else if (arg.startsWith("@")) {
@@ -235,6 +238,8 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} config [--no-approve]
                                  Open TUI to enable/disable package resources
   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list
+  ${APP_NAME} list                      List installed extensions from settings
+  ${APP_NAME} config                    Open TUI to enable/disable package resources
 
 ${chalk.bold("Options:")}
   --provider <name>              Provider name (default: google)
@@ -275,6 +280,7 @@ ${chalk.bold("Options:")}
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
+  --no-setup                     Skip proactive first-run setup
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
   --help, -h                     Show this help
   --version, -v                  Show version number
@@ -377,8 +383,9 @@ ${chalk.bold("Environment Variables:")}
   ${ENV_SESSION_DIR.padEnd(32)} - Session storage directory (overridden by --session-dir)
   PI_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
   PI_OFFLINE                       - Disable startup network operations when set to 1/true/yes
-  PI_TELEMETRY                     - Override install telemetry when set to 1/true/yes or 0/false/no
-  PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
+  PI_TELEMETRY                     - Override telemetry when set to 1/true/yes or 0/false/no
+  PI_DEV_URL                       - Base URL for pi.dev API calls (default: https://pi.dev)
+  PI_SHARE_VIEWER_URL              - Base URL for GitHub gist /share URLs (default: https://pi.dev/session/)
 
 ${chalk.bold("Built-in Tool Names:")}
   read   - Read file contents

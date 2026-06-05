@@ -177,10 +177,10 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 
 | Command | Description |
 |---------|-------------|
-| `/login`, `/logout` | OAuth authentication |
+| `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
-| `/settings` | Thinking level, theme, message delivery, transport |
+| `/settings` | Thinking level, theme, message delivery, transport, activity sync |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
@@ -192,7 +192,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML file |
-| `/share` | Upload as private GitHub gist with shareable HTML link |
+| `/share` | Share via pi.dev when authenticated, otherwise GitHub gist (`/share pi.dev` forces pi.dev) |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files (themes hot-reload automatically) |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
@@ -304,9 +304,10 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 Pi has two separate startup features:
 
 - **Update check:** fetches `https://pi.dev/api/latest-version` to check whether a newer Pi version exists. Disable it with `PI_SKIP_VERSION_CHECK=1`. Disabling update checks only turns off this check.
-- **Install/update telemetry:** after first install or a changelog-detected update, sends an anonymous version ping to `https://pi.dev/api/report-install`. This setting also controls optional provider attribution headers for OpenRouter, Cloudflare, and direct NVIDIA NIM requests. Opt out by setting `enableInstallTelemetry` to `false` in `settings.json`, or by setting `PI_TELEMETRY=0`. This does not disable update checks; Pi may still contact `pi.dev` for the latest version unless update checks are disabled or offline mode is enabled.
+- **Telemetry:** when enabled during first-run onboarding, Pi can send anonymous diagnostics, including install/update version pings to `https://pi.dev/api/report-install` and crash reports when available. Change it with `/settings`, `telemetry.enabled` in `settings.json`, or `PI_TELEMETRY`. This does not disable update checks; Pi may still contact `pi.dev` for the latest version unless update checks are disabled or offline mode is enabled.
+- **pi.dev profiles:** setup can create or sign in to a pi.dev profile and enable background activity sync. `/share` uses an existing pi.dev profile for session sharing, otherwise falls back to GitHub gist; `/share pi.dev` signs in only to store shared sessions. Disable activity sync with `/settings` or `piDev.activitySync.enabled`.
 
-Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
+Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and telemetry.
 
 ---
 
@@ -657,7 +658,7 @@ pi --thinking high "Solve this complex problem"
 | `PI_CODING_AGENT_DIR` | Override config directory (default: `~/.pi/agent`) |
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
 | `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
-| `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
+| `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and telemetry |
 | `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the `pi.dev` latest-version request |
 | `PI_TELEMETRY` | Override install/update telemetry and provider attribution headers. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |

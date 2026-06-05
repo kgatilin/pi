@@ -49,6 +49,7 @@ export interface SettingsConfig {
 	hideThinkingBlock: boolean;
 	collapseChangelog: boolean;
 	enableInstallTelemetry: boolean;
+	activitySyncEnabled: boolean;
 	doubleEscapeAction: "fork" | "tree" | "none";
 	treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 	showHardwareCursor: boolean;
@@ -77,6 +78,7 @@ export interface SettingsCallbacks {
 	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
 	onEnableInstallTelemetryChange: (enabled: boolean) => void;
+	onActivitySyncChange: (enabled: boolean) => void;
 	onDoubleEscapeActionChange: (action: "fork" | "tree" | "none") => void;
 	onTreeFilterModeChange: (mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all") => void;
 	onShowHardwareCursorChange: (enabled: boolean) => void;
@@ -272,9 +274,17 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "install-telemetry",
-				label: "Install telemetry",
-				description: "Send an anonymous version/update ping after changelog-detected updates",
+				label: "Crash reporting and analytics",
+				description:
+					"Allow anonymous diagnostics, including version/update analytics and crash reports when available",
 				currentValue: config.enableInstallTelemetry ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "activity-sync",
+				label: "Activity sync",
+				description: "Sync session activity metadata to pi.dev in the background",
+				currentValue: config.activitySyncEnabled ? "true" : "false",
 				values: ["true", "false"],
 			},
 			{
@@ -511,6 +521,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "install-telemetry":
 						callbacks.onEnableInstallTelemetryChange(newValue === "true");
+						break;
+					case "activity-sync":
+						callbacks.onActivitySyncChange(newValue === "true");
 						break;
 					case "double-escape-action":
 						callbacks.onDoubleEscapeActionChange(newValue as "fork" | "tree");

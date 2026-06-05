@@ -38,7 +38,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
-| `/settings` | Thinking level, theme, message delivery, transport |
+| `/settings` | Thinking level, theme, message delivery, transport, activity sync |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
@@ -49,7 +49,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML |
-| `/share` | Upload as private GitHub gist with shareable HTML link |
+| `/share [pi.dev\|github]` | Share via pi.dev when authenticated, otherwise GitHub gist |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
@@ -124,7 +124,17 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 
 Use `/export [file]` to write a session to HTML.
 
-Use `/share` to upload a private GitHub gist with a shareable HTML link.
+Use `/share` to share the current session HTML. Pi uses pi.dev for an unlisted share when an authenticated pi.dev profile is already available; otherwise it creates a GitHub gist with the `gh` CLI and returns a share-viewer URL.
+
+Use `/share pi.dev` to create or sign in to a pi.dev profile and upload to pi.dev. Use `/share github` to force the GitHub gist backend. `PI_SHARE_VIEWER_URL` controls the viewer base URL for GitHub gist shares.
+
+### Activity Sync
+
+Creating or signing in to a pi.dev profile during setup enables background activity sync. `/share pi.dev` signs in only to store shared sessions and does not change activity sync. Disable sync from `/settings` or by setting `piDev.activitySync.enabled` to `false`.
+
+Activity sync uploads session activity analytics metadata to pi.dev, including session and entry metadata, model IDs, token/cost usage, and content block counts. It omits raw message content, tool arguments, thinking text, error text, labels, names, and custom data.
+
+When enabled, Pi stores the pi.dev OAuth credential in `auth.json`, stores non-secret sync state in `activity-sync.json`, and writes settings under `piDev.activitySync` in `settings.json`. Background sync runs at most once every `piDev.activitySync.intervalHours` hours and is disabled by `PI_OFFLINE=1`.
 
 If you use pi for open source work and want to publish sessions for model, prompt, tool, and evaluation research, see [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). It publishes sessions to Hugging Face datasets.
 
@@ -285,9 +295,11 @@ pi --exclude-tools ask_question
 | `PI_CODING_AGENT_DIR` | Override config directory; default is `~/.pi/agent` |
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
 | `PI_PACKAGE_DIR` | Override package directory, useful for Nix/Guix store paths |
-| `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
+| `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and telemetry |
 | `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the `pi.dev` latest-version request |
 | `PI_TELEMETRY` | Override install/update telemetry and provider attribution headers: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
+| `PI_DEV_URL` | Base URL for pi.dev API calls; default is `https://pi.dev` |
+| `PI_SHARE_VIEWER_URL` | Base URL for GitHub gist `/share github` viewer URLs; default is `https://pi.dev/session/` |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
