@@ -1,24 +1,14 @@
 import { type AgentMessage, uuidv7 } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
-import {
-	appendFileSync,
-	closeSync,
-	createReadStream,
-	existsSync,
-	mkdirSync,
-	openSync,
-	readdirSync,
-	readSync,
-	statSync,
-	writeFileSync,
-} from "fs";
+import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync } from "fs";
 import { readdir, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { FsBackend } from "./fs-backend.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -26,6 +16,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import type { SessionBackend } from "./session-backend.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -766,6 +757,7 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private backend: SessionBackend;
 
 	private constructor(
 		cwd: string,
@@ -773,10 +765,12 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
+		backend?: SessionBackend,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
+		this.backend = backend ?? new FsBackend();
 		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
 			mkdirSync(this.sessionDir, { recursive: true });
 		}
@@ -785,6 +779,18 @@ export class SessionManager {
 			this.setSessionFile(sessionFile);
 		} else {
 			this.newSession(newSessionOptions);
+		}
+	}
+
+	/**
+	 * Register the current session's storage location with the backend
+	 * (if the backend is an FsBackend that needs a path). No-op for other
+	 * backends that route by sessionId alone.
+	 */
+	private _registerBackendPath(): void {
+		if (!this.persist || !this.sessionFile) return;
+		if (this.backend instanceof FsBackend) {
+			this.backend.registerSessionPath(this.sessionId, this.sessionFile);
 		}
 	}
 
@@ -800,6 +806,7 @@ export class SessionManager {
 				const explicitPath = this.sessionFile;
 				this.newSession();
 				this.sessionFile = explicitPath;
+				this._registerBackendPath();
 				this._rewriteFile();
 				this.flushed = true;
 				return;
@@ -807,6 +814,7 @@ export class SessionManager {
 
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 			this.sessionId = header?.id ?? createSessionId();
+			this._registerBackendPath();
 
 			if (migrateToCurrentVersion(this.fileEntries)) {
 				this._rewriteFile();
@@ -818,6 +826,7 @@ export class SessionManager {
 			const explicitPath = this.sessionFile;
 			this.newSession();
 			this.sessionFile = explicitPath; // preserve explicit path from --session flag
+			this._registerBackendPath();
 		}
 	}
 
@@ -844,6 +853,7 @@ export class SessionManager {
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 			this.sessionFile = join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
+			this._registerBackendPath();
 		}
 		return this.sessionFile;
 	}
@@ -871,14 +881,10 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
-		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
-			}
-		} finally {
-			closeSync(fd);
-		}
+		const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
+		if (!header) return;
+		const entries = this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		this.backend.rewrite(this.sessionId, header, entries);
 	}
 
 	isPersisted(): boolean {
@@ -911,7 +917,7 @@ export class SessionManager {
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
 			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				this.backend.appendEntry(this.sessionId, entry);
 			} else {
 				// Mark as not flushed so when assistant arrives, all entries get written
 				this.flushed = false;
@@ -920,17 +926,19 @@ export class SessionManager {
 		}
 
 		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
-				}
-			} finally {
-				closeSync(fd);
+			// First flush: write header + all accumulated entries atomically.
+			// Uses the backend's `createSession` (exclusive create for the header)
+			// followed by per-entry appends to preserve the original wx semantics.
+			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
+			if (!header) return;
+			this.backend.createSession(header);
+			for (const e of this.fileEntries) {
+				if (e.type === "session") continue;
+				this.backend.appendEntry(this.sessionId, e);
 			}
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			this.backend.appendEntry(this.sessionId, entry);
 		}
 	}
 
@@ -1338,6 +1346,7 @@ export class SessionManager {
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
+			this._registerBackendPath();
 			this._buildIndex();
 
 			// Only write the file now if it contains an assistant message.
@@ -1472,16 +1481,18 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
+		const forkBackend = new FsBackend();
+		forkBackend.registerSessionPath(newSessionId, newSessionFile);
+		forkBackend.createSession(newHeader);
 
 		// Copy all non-header entries from source
 		for (const entry of sourceEntries) {
 			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+				forkBackend.appendEntry(newSessionId, entry as SessionEntry);
 			}
 		}
 
-		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
+		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true, undefined, forkBackend);
 	}
 
 	/**
