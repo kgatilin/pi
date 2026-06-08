@@ -1,9 +1,41 @@
+/**
+ * FsBackend test suite: contract + filesystem-specific behaviour.
+ *
+ * Shared cross-backend behaviour lives in {@link runSessionBackendContract}.
+ * This file adds FS-only assertions (file-on-disk content, parent-directory
+ * creation, path relocation via `registerSessionPath`).
+ */
+
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FsBackend } from "../../src/core/fs-backend.ts";
-import type { SessionEntry, SessionHeader, SessionMessageEntry } from "../../src/core/session-manager.ts";
+import type { SessionHeader, SessionMessageEntry } from "../../src/core/session-manager.ts";
+import { type BackendFactory, runSessionBackendContract } from "./backend-contract.ts";
+
+// One tmpdir per test run, cleaned up at end. Per-session paths live under it.
+let sharedTempDir: string;
+
+beforeAll(() => {
+	sharedTempDir = mkdtempSync(join(tmpdir(), "fs-backend-contract-"));
+});
+afterAll(() => {
+	rmSync(sharedTempDir, { recursive: true, force: true });
+});
+
+const fsFactory: BackendFactory = {
+	async create() {
+		return new FsBackend();
+	},
+	prepareSession(backend, sessionId) {
+		(backend as FsBackend).registerSessionPath(sessionId, join(sharedTempDir, `${sessionId}.jsonl`));
+	},
+};
+
+runSessionBackendContract("FsBackend", fsFactory);
+
+// ----- FS-specific tests below: cover concerns that don't apply to NATS. -----
 
 function makeHeader(id: string): SessionHeader {
 	return {
@@ -25,7 +57,7 @@ function makeMessageEntry(id: string, parentId: string | null, text: string): Se
 	};
 }
 
-describe("FsBackend", () => {
+describe("FsBackend (filesystem-specific)", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
@@ -36,150 +68,84 @@ describe("FsBackend", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("createSession writes the header as the first JSONL line", () => {
+	it("createSession writes the header as the first JSONL line", async () => {
 		const backend = new FsBackend();
 		const sessionId = "sess-create";
 		const sessionFile = join(tempDir, `${sessionId}.jsonl`);
 		backend.registerSessionPath(sessionId, sessionFile);
 
 		const header = makeHeader(sessionId);
-		backend.createSession(header);
+		await backend.createSession(header);
+		await backend.flush();
 
 		const content = readFileSync(sessionFile, "utf8");
 		const firstLine = content.split("\n")[0];
 		expect(JSON.parse(firstLine)).toEqual(header);
 	});
 
-	it("createSession creates the parent directory if missing", () => {
+	it("createSession creates the parent directory if missing", async () => {
 		const backend = new FsBackend();
 		const sessionId = "sess-mkdir";
 		const sessionFile = join(tempDir, "nested", "sub", `${sessionId}.jsonl`);
 		backend.registerSessionPath(sessionId, sessionFile);
 
-		backend.createSession(makeHeader(sessionId));
+		await backend.createSession(makeHeader(sessionId));
+		await backend.flush();
 
 		expect(readFileSync(sessionFile, "utf8").length).toBeGreaterThan(0);
 	});
 
-	it("createSession refuses to clobber an existing file (wx semantics)", () => {
+	it("createSession throws when no path is registered", async () => {
 		const backend = new FsBackend();
-		const sessionId = "sess-wx";
-		const sessionFile = join(tempDir, `${sessionId}.jsonl`);
-		backend.registerSessionPath(sessionId, sessionFile);
-
-		backend.createSession(makeHeader(sessionId));
-		expect(() => backend.createSession(makeHeader(sessionId))).toThrow();
+		await expect(backend.createSession(makeHeader("no-path"))).rejects.toThrow(/no path registered/);
 	});
 
-	it("appendEntry round-trips with readAll (header + entries in order)", () => {
-		const backend = new FsBackend();
-		const sessionId = "sess-rt";
-		const sessionFile = join(tempDir, `${sessionId}.jsonl`);
-		backend.registerSessionPath(sessionId, sessionFile);
-
-		const header = makeHeader(sessionId);
-		backend.createSession(header);
-
-		const e1 = makeMessageEntry("aaaaaaaa", null, "first");
-		const e2 = makeMessageEntry("bbbbbbbb", "aaaaaaaa", "second");
-		const e3 = makeMessageEntry("cccccccc", "bbbbbbbb", "third");
-		backend.appendEntry(sessionId, e1);
-		backend.appendEntry(sessionId, e2);
-		backend.appendEntry(sessionId, e3);
-
-		const loaded = backend.readAll(sessionId);
-		expect(loaded).toHaveLength(4);
-		expect(loaded[0]).toEqual(header);
-		expect(loaded[1]).toEqual(e1);
-		expect(loaded[2]).toEqual(e2);
-		expect(loaded[3]).toEqual(e3);
-	});
-
-	it("readAll returns empty array for unknown session", () => {
-		const backend = new FsBackend();
-		expect(backend.readAll("unknown")).toEqual([]);
-	});
-
-	it("readAll returns empty array when the registered file does not exist", () => {
-		const backend = new FsBackend();
-		const sessionId = "sess-missing";
-		backend.registerSessionPath(sessionId, join(tempDir, "does-not-exist.jsonl"));
-		expect(backend.readAll(sessionId)).toEqual([]);
-	});
-
-	it("rewrite replaces existing content atomically", () => {
-		const backend = new FsBackend();
-		const sessionId = "sess-rewrite";
-		const sessionFile = join(tempDir, `${sessionId}.jsonl`);
-		backend.registerSessionPath(sessionId, sessionFile);
-
-		const originalHeader = makeHeader(sessionId);
-		backend.createSession(originalHeader);
-		backend.appendEntry(sessionId, makeMessageEntry("11111111", null, "old"));
-		backend.appendEntry(sessionId, makeMessageEntry("22222222", "11111111", "older"));
-
-		const newHeader: SessionHeader = { ...originalHeader, timestamp: "2030-01-01T00:00:00.000Z" };
-		const newEntries: SessionEntry[] = [
-			makeMessageEntry("ffffffff", null, "fresh-first"),
-			makeMessageEntry("eeeeeeee", "ffffffff", "fresh-second"),
-		];
-		backend.rewrite(sessionId, newHeader, newEntries);
-
-		const loaded = backend.readAll(sessionId);
-		expect(loaded).toHaveLength(3);
-		expect(loaded[0]).toEqual(newHeader);
-		expect(loaded[1]).toEqual(newEntries[0]);
-		expect(loaded[2]).toEqual(newEntries[1]);
-	});
-
-	it("delete removes the session file and forgets the path", () => {
-		const backend = new FsBackend();
-		const sessionId = "sess-delete";
-		const sessionFile = join(tempDir, `${sessionId}.jsonl`);
-		backend.registerSessionPath(sessionId, sessionFile);
-
-		backend.createSession(makeHeader(sessionId));
-		backend.appendEntry(sessionId, makeMessageEntry("aaaaaaaa", null, "to-be-deleted"));
-
-		backend.delete(sessionId);
-
-		expect(backend.tryGetPath(sessionId)).toBeUndefined();
-		expect(() => readFileSync(sessionFile, "utf8")).toThrow();
-		// Subsequent readAll on a deleted session returns empty.
-		expect(backend.readAll(sessionId)).toEqual([]);
-	});
-
-	it("delete tolerates a missing underlying file", () => {
-		const backend = new FsBackend();
-		const sessionId = "sess-delete-missing";
-		backend.registerSessionPath(sessionId, join(tempDir, "never-existed.jsonl"));
-		expect(() => backend.delete(sessionId)).not.toThrow();
-		expect(backend.tryGetPath(sessionId)).toBeUndefined();
-	});
-
-	it("delete on unknown session is a no-op", () => {
-		const backend = new FsBackend();
-		expect(() => backend.delete("never-registered")).not.toThrow();
-	});
-
-	it("createSession throws when no path is registered", () => {
-		const backend = new FsBackend();
-		expect(() => backend.createSession(makeHeader("no-path"))).toThrow(/no path registered/);
-	});
-
-	it("registerSessionPath can switch a session to a new path", () => {
+	it("registerSessionPath can switch a session to a new path", async () => {
 		const backend = new FsBackend();
 		const sessionId = "sess-relocate";
 		const firstPath = join(tempDir, "first.jsonl");
 		const secondPath = join(tempDir, "second.jsonl");
 
 		backend.registerSessionPath(sessionId, firstPath);
-		backend.createSession(makeHeader(sessionId));
+		await backend.createSession(makeHeader(sessionId));
+		await backend.flush();
 
 		backend.registerSessionPath(sessionId, secondPath);
-		backend.createSession(makeHeader(sessionId));
+		await backend.createSession(makeHeader(sessionId));
+		await backend.flush();
 
 		expect(readFileSync(firstPath, "utf8").length).toBeGreaterThan(0);
 		expect(readFileSync(secondPath, "utf8").length).toBeGreaterThan(0);
+	});
+
+	it("delete forgets the registered path and tolerates missing files", async () => {
+		const backend = new FsBackend();
+		const sessionId = "sess-delete-missing";
+		backend.registerSessionPath(sessionId, join(tempDir, "never-existed.jsonl"));
+		await expect(backend.delete(sessionId)).resolves.toBeUndefined();
+		expect(backend.tryGetPath(sessionId)).toBeUndefined();
+	});
+
+	it("readAll returns empty array when the registered file does not exist", async () => {
+		const backend = new FsBackend();
+		const sessionId = "sess-missing";
+		backend.registerSessionPath(sessionId, join(tempDir, "does-not-exist.jsonl"));
+		expect(await backend.readAll(sessionId)).toEqual([]);
+	});
+
+	it("appendEntry round-trip writes JSONL lines after the header", async () => {
+		const backend = new FsBackend();
+		const sessionId = "sess-rt-fs";
+		const sessionFile = join(tempDir, `${sessionId}.jsonl`);
+		backend.registerSessionPath(sessionId, sessionFile);
+
+		await backend.createSession(makeHeader(sessionId));
+		await backend.appendEntry(sessionId, makeMessageEntry("aaaaaaaa", null, "first"));
+		await backend.flush();
+
+		const lines = readFileSync(sessionFile, "utf8").trimEnd().split("\n");
+		expect(lines).toHaveLength(2);
+		expect(JSON.parse(lines[0]).type).toBe("session");
+		expect(JSON.parse(lines[1]).type).toBe("message");
 	});
 });
