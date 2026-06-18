@@ -149,6 +149,7 @@ export {
 } from "./core/extensions/index.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+export { FsBackend } from "./core/fs-backend.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
 export type {
@@ -190,6 +191,7 @@ export {
 	createWriteTool,
 	type PromptTemplate,
 } from "./core/sdk.ts";
+export type { SessionBackend } from "./core/session-backend.ts";
 export {
 	type BranchSummaryEntry,
 	buildSessionContext,

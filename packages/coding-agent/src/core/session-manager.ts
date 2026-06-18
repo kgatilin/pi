@@ -2,7 +2,6 @@ import { type AgentMessage, uuidv7 } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
-	appendFileSync,
 	closeSync,
 	createReadStream,
 	existsSync,
@@ -19,6 +18,7 @@ import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { FsBackend } from "./fs-backend.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -26,6 +26,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import type { SessionBackend } from "./session-backend.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -766,6 +767,17 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private backend: SessionBackend;
+	/**
+	 * Tail of fire-and-forget backend write promises. Each new write chains
+	 * onto this so {@link SessionManager#flush} can await all pending I/O.
+	 * The backend itself also maintains per-session ordering — this tail
+	 * exists so SessionManager can offer a single «everything written»
+	 * fence to callers (tests, shutdown paths) without exposing the backend.
+	 */
+	private writeTail: Promise<unknown> = Promise.resolve();
+	/** Most recent unsurfaced backend-write error, if any. */
+	private lastWriteError: Error | undefined;
 
 	private constructor(
 		cwd: string,
@@ -773,10 +785,12 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
+		backend?: SessionBackend,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
+		this.backend = backend ?? new FsBackend();
 		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
 			mkdirSync(this.sessionDir, { recursive: true });
 		}
@@ -785,6 +799,18 @@ export class SessionManager {
 			this.setSessionFile(sessionFile);
 		} else {
 			this.newSession(newSessionOptions);
+		}
+	}
+
+	/**
+	 * Register the current session's storage location with the backend
+	 * (if the backend is an FsBackend that needs a path). No-op for other
+	 * backends that route by sessionId alone.
+	 */
+	private _registerBackendPath(): void {
+		if (!this.persist || !this.sessionFile) return;
+		if (this.backend instanceof FsBackend) {
+			this.backend.registerSessionPath(this.sessionId, this.sessionFile);
 		}
 	}
 
@@ -800,6 +826,7 @@ export class SessionManager {
 				const explicitPath = this.sessionFile;
 				this.newSession();
 				this.sessionFile = explicitPath;
+				this._registerBackendPath();
 				this._rewriteFile();
 				this.flushed = true;
 				return;
@@ -807,6 +834,7 @@ export class SessionManager {
 
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 			this.sessionId = header?.id ?? createSessionId();
+			this._registerBackendPath();
 
 			if (migrateToCurrentVersion(this.fileEntries)) {
 				this._rewriteFile();
@@ -818,6 +846,7 @@ export class SessionManager {
 			const explicitPath = this.sessionFile;
 			this.newSession();
 			this.sessionFile = explicitPath; // preserve explicit path from --session flag
+			this._registerBackendPath();
 		}
 	}
 
@@ -844,6 +873,7 @@ export class SessionManager {
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 			this.sessionFile = join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
+			this._registerBackendPath();
 		}
 		return this.sessionFile;
 	}
@@ -869,16 +899,62 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Hand a backend write off to the fire-and-forget tail so SessionManager
+	 * preserves its sync surface while the async backend churns underneath.
+	 * Failures are captured in {@link lastWriteError} so {@link flush} can
+	 * surface them on the next fence.
+	 */
+	private _track(p: Promise<unknown>): void {
+		this.writeTail = this.writeTail.then(
+			() => p,
+			() => p,
+		);
+		// Trap promise rejection per-write so unhandled-rejection doesn't crash.
+		p.catch((err) => {
+			this.lastWriteError = err instanceof Error ? err : new Error(String(err));
+		});
+	}
+
+	/**
+	 * Await all pending backend writes and throw the most recent write
+	 * error, if any. Used by tests and by callers that need a durable
+	 * fence (e.g. before exit or before re-reading session state).
+	 */
+	async flush(): Promise<void> {
+		await this.writeTail;
+		await this.backend.flush();
+		if (this.lastWriteError) {
+			const err = this.lastWriteError;
+			this.lastWriteError = undefined;
+			throw err;
+		}
+	}
+
+	/**
+	 * Close the underlying backend, flushing pending writes first. After
+	 * close, this SessionManager MUST NOT be used.
+	 */
+	async close(): Promise<void> {
+		await this.flush();
+		await this.backend.close();
+	}
+
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
-		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
-			}
-		} finally {
-			closeSync(fd);
+		const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
+		if (!header) return;
+		const entries = this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		// FsBackend exposes a sync escape hatch (rewriteSync) used by recovery/
+		// migration/branched-session paths that the existing Pi tests observe
+		// synchronously. For other backends (NATS, future Postgres) fall back
+		// to the async path — those backends are wired in fresh deployments
+		// that don't rely on the sync-file-snapshot contract.
+		if (this.backend instanceof FsBackend) {
+			this.backend.rewriteSync(this.sessionId, header, entries);
+			return;
 		}
+		this._track(this.backend.rewrite(this.sessionId, header, entries));
 	}
 
 	isPersisted(): boolean {
@@ -911,7 +987,7 @@ export class SessionManager {
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
 			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				this._persistOne(entry);
 			} else {
 				// Mark as not flushed so when assistant arrives, all entries get written
 				this.flushed = false;
@@ -920,17 +996,42 @@ export class SessionManager {
 		}
 
 		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
-			try {
+			// First flush: write header + all accumulated entries atomically.
+			//
+			// FsBackend: use the sync escape hatch so the file is on disk
+			// immediately (the existing Pi test suite assumes synchronous
+			// observability of session files immediately after the call that
+			// triggers a flush).
+			//
+			// Other backends: enqueue createSession + per-entry appends onto
+			// the backend's per-session queue so order is preserved.
+			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
+			if (!header) return;
+			if (this.backend instanceof FsBackend) {
+				const entries = this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+				this.backend.rewriteSync(this.sessionId, header, entries);
+			} else {
+				this._track(this.backend.createSession(header));
 				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
+					if (e.type === "session") continue;
+					this._track(this.backend.appendEntry(this.sessionId, e));
 				}
-			} finally {
-				closeSync(fd);
 			}
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			this._persistOne(entry);
+		}
+	}
+
+	/**
+	 * Persist a single entry — sync for FsBackend (preserves the existing
+	 * sync-file-snapshot test contract), async-with-tracking for others.
+	 */
+	private _persistOne(entry: SessionEntry): void {
+		if (this.backend instanceof FsBackend) {
+			this.backend.appendEntrySync(this.sessionId, entry);
+		} else {
+			this._track(this.backend.appendEntry(this.sessionId, entry));
 		}
 	}
 
@@ -1338,6 +1439,7 @@ export class SessionManager {
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
+			this._registerBackendPath();
 			this._buildIndex();
 
 			// Only write the file now if it contains an assistant message.
@@ -1472,16 +1574,24 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-
-		// Copy all non-header entries from source
+		// Seed the fork file synchronously so the SessionManager constructor's
+		// `existsSync` probe on the explicit session file path returns true
+		// and the existing branch (open-existing) is taken. We deliberately
+		// bypass the (now async) backend for this one-shot seed; the
+		// SessionManager will pick up the registered path and continue
+		// appending via the (sync-facing) FsBackend afterwards.
+		const lines: string[] = [JSON.stringify(newHeader)];
 		for (const entry of sourceEntries) {
 			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+				lines.push(JSON.stringify(entry));
 			}
 		}
+		writeFileSync(newSessionFile, `${lines.join("\n")}\n`, { flag: "wx" });
 
-		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
+		const forkBackend = new FsBackend();
+		forkBackend.registerSessionPath(newSessionId, newSessionFile);
+
+		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true, undefined, forkBackend);
 	}
 
 	/**
